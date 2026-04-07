@@ -1,5 +1,7 @@
 package com.debugtools.debugkit
 
+import org.json.JSONObject
+
 internal data class DebugRequest(
     val id: String,
     val type: String,
@@ -8,47 +10,49 @@ internal data class DebugRequest(
 
 internal object DebugProtocol {
     fun parseRequest(line: String): DebugRequest? {
-        val id = readString(line, "id") ?: return null
-        val type = readString(line, "type") ?: return null
+        val root = parseJson(line) ?: return null
+        val id = root.optString("id", "")
+        val type = root.optString("type", "")
+        if (id.isEmpty() || type.isEmpty()) return null
         return DebugRequest(id = id, type = type, raw = line)
     }
 
     fun readString(json: String, key: String): String? {
-        val token = """"$key""""
-        val start = json.indexOf(token)
-        if (start < 0) return null
-        val colon = json.indexOf(':', start + token.length)
-        val quoteStart = json.indexOf('"', colon + 1)
-        val quoteEnd = json.indexOf('"', quoteStart + 1)
-        if (colon < 0 || quoteStart < 0 || quoteEnd < 0) return null
-        return json.substring(quoteStart + 1, quoteEnd)
+        val root = parseJson(json) ?: return null
+        if (!root.has(key) || root.isNull(key)) return null
+        val value = root.optString(key, "")
+        return value.takeIf { it.isNotEmpty() }
     }
 
     fun readInt(json: String, key: String): Int? {
-        val token = """"$key""""
-        val start = json.indexOf(token)
-        if (start < 0) return null
-        val colon = json.indexOf(':', start + token.length)
-        if (colon < 0) return null
-        val tail = json.substring(colon + 1).trimStart()
-        return tail.takeWhile { it.isDigit() || it == '-' }.toIntOrNull()
+        val root = parseJson(json) ?: return null
+        if (!root.has(key) || root.isNull(key)) return null
+        val raw = root.opt(key)
+        return when (raw) {
+            is Number -> raw.toInt()
+            is String -> raw.toIntOrNull()
+            else -> null
+        }
     }
 
     fun readStringMap(json: String, key: String): Map<String, String> {
-        val token = """"$key""""
-        val start = json.indexOf(token)
-        if (start < 0) return emptyMap()
-        val blockStart = json.indexOf('{', start + token.length)
-        val blockEnd = json.indexOf('}', blockStart + 1)
-        if (blockStart < 0 || blockEnd < 0) return emptyMap()
-        val block = json.substring(blockStart + 1, blockEnd)
-        if (block.isBlank()) return emptyMap()
-        return block.split(",").mapNotNull { entry ->
-            val pair = entry.split(":")
-            if (pair.size != 2) return@mapNotNull null
-            val k = pair[0].trim().removePrefix("\"").removeSuffix("\"")
-            val v = pair[1].trim().removePrefix("\"").removeSuffix("\"")
-            k to v
-        }.toMap()
+        val root = parseJson(json) ?: return emptyMap()
+        if (!root.has(key) || root.isNull(key)) return emptyMap()
+        val mapJson = root.optJSONObject(key) ?: return emptyMap()
+        val result = linkedMapOf<String, String>()
+        val keys = mapJson.keys()
+        while (keys.hasNext()) {
+            val currentKey = keys.next()
+            result[currentKey] = mapJson.optString(currentKey, "")
+        }
+        return result
+    }
+
+    private fun parseJson(raw: String): JSONObject? {
+        return try {
+            JSONObject(raw)
+        } catch (_: Throwable) {
+            null
+        }
     }
 }
