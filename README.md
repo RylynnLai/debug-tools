@@ -58,15 +58,24 @@ Set your app class in `AndroidManifest.xml`:
     ... />
 ```
 
-### 4) Enable network mocking (OkHttp)
+### 4) Enable non-intrusive network interception (VPN proxy)
 
-Add `DebugMockInterceptor` to your business client:
+Preferred path (no business `OkHttpClient` changes):
 
 ```kotlin
-val client = OkHttpClient.Builder()
-    .addInterceptor(DebugMockInterceptor())
-    .build()
+val prepareIntent = DebugVpnController.prepareIntent(this)
+if (prepareIntent == null) {
+    DebugVpnController.start(this, packageName)
+}
 ```
+
+Stop when done:
+
+```kotlin
+DebugVpnController.stop(this)
+```
+
+`DebugMockInterceptor` is still available as an optional fallback for apps/environments where VPN mode is not enabled.
 
 ### 5) Watch suspicious objects for leaks
 
@@ -155,7 +164,7 @@ dependencies {
 }
 ```
 
-4) Continue with the same runtime setup in this README (`DebugKit.install`, interceptor, watch, desktop connect).
+4) Continue with the same runtime setup in this README (`DebugKit.install`, `DebugVpnController`, watch, desktop connect).
 
 ### External integration validation
 
@@ -168,7 +177,7 @@ dependencies {
 
 - `Project with path ':debugkit' not found`: check `settings.gradle.kts` include order and path.
 - Repository resolution errors with `FAIL_ON_PROJECT_REPOS`: add repositories in `dependencyResolutionManagement`, not module build files.
-- Mock not working: ensure your real `OkHttpClient` uses `DebugMockInterceptor()`.
+- Mock not working in VPN mode: HTTP cleartext can be mocked by path; HTTPS payload mocking requires MITM support (not in current MVP).
 - Connected but no data: verify app has foreground Activity and both devices are on the same LAN.
 
 ## Run and connect

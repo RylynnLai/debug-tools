@@ -1,6 +1,7 @@
 plugins {
     id("com.android.library")
     id("org.jetbrains.kotlin.android")
+    id("maven-publish")
 }
 
 android {
@@ -20,6 +21,22 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    sourceSets {
+        getByName("main") {
+            java.srcDir("../debugvpn/src/main/java")
+            manifest.srcFile("../debugvpn/src/main/AndroidManifest.xml")
+        }
+        getByName("test") {
+            java.srcDir("../debugvpn/src/test/java")
+        }
+    }
+
+    publishing {
+        singleVariant("release") {
+            withSourcesJar()
+        }
+    }
 }
 
 dependencies {
@@ -28,4 +45,20 @@ dependencies {
     // Full LeakCanary: auto-detects Activity/Fragment/ViewModel/Service leaks,
     // runs heap dump + analysis, and exposes OnHeapAnalyzedListener for enriching leak info.
     api("com.squareup.leakcanary:leakcanary-android:2.14")
+    testImplementation("junit:junit:4.13.2")
 }
+
+publishing {
+    publications {
+        register<MavenPublication>("release") {
+            groupId = "com.debugtools"
+            artifactId = "debugkit"
+            version = "1.0.0-local"
+
+            afterEvaluate {
+                from(components["release"])
+            }
+        }
+    }
+}
+

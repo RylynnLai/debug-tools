@@ -5,10 +5,11 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.os.Bundle
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import com.debugtools.app.databinding.ActivityMainBinding
 import com.debugtools.debugkit.DebugKit
-import com.debugtools.debugkit.DebugMockInterceptor
+import com.debugtools.debugkit.DebugVpnController
 import com.debugtools.debugkit.MockRule
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -20,9 +21,19 @@ class MainActivity : AppCompatActivity() {
     /** Demo-only client. Your production client should be built at the Application layer. */
     private val demoHttpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
-            .addInterceptor(DebugMockInterceptor())
             .build()
     }
+
+    private val vpnPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+            if (DebugVpnController.prepareIntent(this) == null) {
+                DebugVpnController.start(this, packageName)
+                Toast.makeText(this, "VPN proxy started", Toast.LENGTH_SHORT).show()
+                renderStatus()
+            } else {
+                Toast.makeText(this, "VPN permission denied", Toast.LENGTH_SHORT).show()
+            }
+        }
 
     // Strong reference used for leak demo. Holding Activity-related objects can leak.
     private var leakyHolder: LeakyObject? = null
@@ -34,6 +45,8 @@ class MainActivity : AppCompatActivity() {
 
         binding.refreshButton.setOnClickListener { renderStatus() }
         binding.copyConnectButton.setOnClickListener { copyConnectInfo() }
+        binding.startVpnButton.setOnClickListener { startVpnProxy() }
+        binding.stopVpnButton.setOnClickListener { stopVpnProxy() }
         binding.addMockButton.setOnClickListener { registerSampleMock() }
         binding.sendRequestButton.setOnClickListener { sendMockRequest() }
         binding.watchObjectButton.setOnClickListener { watchSampleObject() }
@@ -58,9 +71,27 @@ class MainActivity : AppCompatActivity() {
             appendLine("port      : ${state.port}")
             appendLine("clients   : ${state.connectedClients}")
             appendLine("mocks     : ${state.mockRules}")
-            append("watching  : ${state.watchedObjects}")
+            appendLine("watching  : ${state.watchedObjects}")
+            append("vpnProxy  : ${DebugVpnController.isRunning()}")
         }
         binding.connectInfoText.text = "${state.host}:${state.port}"
+    }
+
+    private fun startVpnProxy() {
+        val prepareIntent = DebugVpnController.prepareIntent(this)
+        if (prepareIntent == null) {
+            DebugVpnController.start(this, packageName)
+            Toast.makeText(this, "VPN proxy started", Toast.LENGTH_SHORT).show()
+            renderStatus()
+            return
+        }
+        vpnPermissionLauncher.launch(prepareIntent)
+    }
+
+    private fun stopVpnProxy() {
+        DebugVpnController.stop(this)
+        Toast.makeText(this, "VPN proxy stopped", Toast.LENGTH_SHORT).show()
+        renderStatus()
     }
 
     // --- Connection info ---
