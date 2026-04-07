@@ -83,7 +83,6 @@ internal class DebugServer(
                     ok(request.id, "view_preview", preview.toJson())
                 }
             }
-            "get_memory_stats" -> ok(request.id, "memory_stats", MemorySampler.sample().toJson())
             "update_view_props" -> {
                 val path = DebugProtocol.readString(request.raw, "path")
                     ?: return error(request.id, "bad_request", "path required")
@@ -165,9 +164,6 @@ internal class DebugServer(
     }
 }
 
-private fun MemoryStats.toJson(): String {
-    return """{"javaUsedMb":$javaUsedMb,"javaMaxMb":$javaMaxMb,"nativeHeapMb":$nativeHeapMb,"totalPssKb":$totalPssKb,"nativePssKb":$nativePssKb,"dalvikPssKb":$dalvikPssKb,"otherPssKb":$otherPssKb}"""
-}
 
 private fun ViewTreeSnapshot.toJson(): String {
     return """{"activity":"${Json.escape(activity)}","tree":${tree.toJson()}}"""

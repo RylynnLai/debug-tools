@@ -9,7 +9,6 @@ import androidx.appcompat.app.AppCompatActivity
 import com.debugtools.app.databinding.ActivityMainBinding
 import com.debugtools.debugkit.DebugKit
 import com.debugtools.debugkit.DebugMockInterceptor
-import com.debugtools.debugkit.MemorySampler
 import com.debugtools.debugkit.MockRule
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -40,7 +39,6 @@ class MainActivity : AppCompatActivity() {
         binding.watchObjectButton.setOnClickListener { watchSampleObject() }
         binding.triggerGcButton.setOnClickListener { triggerGc() }
         binding.runLeakTestButton.setOnClickListener { runLeakTest() }
-        binding.sampleMemoryButton.setOnClickListener { sampleMemory() }
 
         renderStatus()
     }
@@ -134,23 +132,6 @@ class MainActivity : AppCompatActivity() {
         Runtime.getRuntime().gc()
         System.gc()
         binding.leakResultText.text = "🗑 GC triggered\nCheck retained status from desktop watch list"
-    }
-
-    // --- Memory snapshot ---
-
-    private fun sampleMemory() {
-        Thread {
-            val stats = MemorySampler.sample()
-            val text = buildString {
-                appendLine("Java used  : ${stats.javaUsedMb} MB / ${stats.javaMaxMb} MB")
-                appendLine("Native heap: ${stats.nativeHeapMb} MB")
-                appendLine("Total PSS  : ${stats.totalPssKb} KB")
-                appendLine("Native PSS : ${stats.nativePssKb} KB")
-                appendLine("Dalvik PSS : ${stats.dalvikPssKb} KB")
-                append("Other PSS  : ${stats.otherPssKb} KB")
-            }
-            runOnUiThread { binding.memoryResultText.text = text }
-        }.start()
     }
 }
 

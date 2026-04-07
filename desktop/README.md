@@ -12,5 +12,4 @@
 
 - 连接 Android probe
 - 拉取 View 树
-- 拉取内存状态
 - 管理 mock 规则

@@ -20,7 +20,6 @@
 - `get_view_tree`
 - `get_view_preview`
 - `update_view_props`
-- `get_memory_stats`
 - `list_mocks`
 - `set_mock`
 - `clear_mock`

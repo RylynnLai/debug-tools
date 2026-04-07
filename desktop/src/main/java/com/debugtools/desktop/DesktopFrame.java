@@ -24,6 +24,7 @@ import java.awt.geom.AffineTransform;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.io.ByteArrayInputStream;
+import java.net.ConnectException;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -78,7 +79,6 @@ public final class DesktopFrame extends JFrame {
     private final DefaultMutableTreeNode viewRoot = new DefaultMutableTreeNode("No view tree yet");
     private final DefaultTreeModel viewTreeModel = new DefaultTreeModel(viewRoot);
     private final JTree viewTree = new JTree(viewTreeModel);
-    private final JTextArea memoryArea = new JTextArea("No memory snapshot yet");
     private final DefaultTableModel mockTableModel = new DefaultTableModel(new Object[]{"Method", "Path", "Status", "Body"}, 0) {
         @Override
         public boolean isCellEditable(int row, int column) {
@@ -181,8 +181,6 @@ public final class DesktopFrame extends JFrame {
         });
         JButton previewButton = new JButton("Fetch Preview");
         previewButton.addActionListener(event -> send("get_view_preview", ""));
-        JButton memoryButton = new JButton("Fetch Memory");
-        memoryButton.addActionListener(event -> requestLeakSnapshot());
 
         connectPanel.add(new JLabel("Host"));
         connectPanel.add(hostField);
@@ -190,10 +188,9 @@ public final class DesktopFrame extends JFrame {
         connectPanel.add(portField);
         connectPanel.add(connectButton);
 
-        JPanel actionPanel = new JPanel(new GridLayout(1, 3, 8, 8));
+        JPanel actionPanel = new JPanel(new GridLayout(1, 2, 8, 8));
         actionPanel.add(viewButton);
         actionPanel.add(previewButton);
-        actionPanel.add(memoryButton);
 
         panel.add(connectPanel);
         panel.add(actionPanel);
@@ -205,7 +202,6 @@ public final class DesktopFrame extends JFrame {
         panel.setBorder(BorderFactory.createEmptyBorder(12, 12, 12, 12));
 
         outputArea.setEditable(false);
-        memoryArea.setEditable(false);
         leakHistoryArea.setEditable(false);
 
         JTabbedPane tabs = new JTabbedPane();
@@ -220,18 +216,12 @@ public final class DesktopFrame extends JFrame {
 
     private JPanel buildMemoryLeakTab() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
-        JSplitPane summaryAndWatchSplit = new JSplitPane(
-            JSplitPane.VERTICAL_SPLIT,
-            new JScrollPane(memoryArea),
-            new JScrollPane(watchTable)
-        );
-        summaryAndWatchSplit.setResizeWeight(0.34);
         JSplitPane leakContentSplit = new JSplitPane(
             JSplitPane.VERTICAL_SPLIT,
-            summaryAndWatchSplit,
+            new JScrollPane(watchTable),
             new JScrollPane(leakHistoryArea)
         );
-        leakContentSplit.setResizeWeight(0.74);
+        leakContentSplit.setResizeWeight(0.7);
 
         panel.add(retainedCountLabel, BorderLayout.NORTH);
         panel.add(leakContentSplit, BorderLayout.CENTER);
@@ -334,7 +324,7 @@ public final class DesktopFrame extends JFrame {
 
     private JPanel buildMemoryLeakToolPanel() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
-        JButton refreshMemoryLeakButton = new JButton("Refresh Memory Leak");
+        JButton refreshMemoryLeakButton = new JButton("Refresh Watches");
         refreshMemoryLeakButton.addActionListener(event -> requestLeakSnapshot());
         JButton clearLeakHistoryButton = new JButton("Clear Leak History");
         clearLeakHistoryButton.addActionListener(event -> clearLeakHistory());
@@ -362,7 +352,6 @@ public final class DesktopFrame extends JFrame {
     }
 
     private void requestLeakSnapshot() {
-        send("get_memory_stats", "");
         send("list_watches", "");
     }
 
@@ -524,19 +513,42 @@ public final class DesktopFrame extends JFrame {
         networkExecutor.submit(() -> {
             try {
                 String response = client.send(type, payload);
-                if (response == null) {
-                    SwingUtilities.invokeLater(() ->
-                        append("⚠️ [" + type + "] Server closed connection (response is null). Reconnect and retry."));
-                    return;
-                }
                 SwingUtilities.invokeLater(() -> {
                     append(response);
                     renderResponse(response);
                 });
             } catch (IOException exception) {
-                SwingUtilities.invokeLater(() -> showError(exception));
+                if (!retryAfterReconnect(type, payload, exception)) {
+                    SwingUtilities.invokeLater(() -> showError(exception));
+                }
             }
         });
+    }
+
+    private boolean retryAfterReconnect(String type, String payload, IOException firstError) {
+        String message = firstError.getMessage();
+        if (message == null || !message.contains("Server closed connection")) {
+            return false;
+        }
+        String host = hostField.getText().trim();
+        int port;
+        try {
+            port = Integer.parseInt(portField.getText().trim());
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+        try {
+            client.connect(host, port);
+            String response = client.send(type, payload);
+            SwingUtilities.invokeLater(() -> {
+                append("↻ Reconnected and retried: " + type);
+                append(response);
+                renderResponse(response);
+            });
+            return true;
+        } catch (IOException ignored) {
+            return false;
+        }
     }
 
     private void renderResponse(String response) {
@@ -547,13 +559,24 @@ public final class DesktopFrame extends JFrame {
             case "view_tree" -> renderViewTree(payload);
             case "view_preview" -> renderViewPreview(payload);
             case "view_updated" -> append("✅ View updated");
-            case "memory_stats" -> renderMemory(payload);
             case "mock_list", "mock_saved" -> renderMocks(payload);
             case "watch_list" -> renderWatches(payload);
             case "leak_event" -> renderLeakEvent(payload);
+            case "error" -> renderProtocolError(root);
             default -> {
             }
         }
+    }
+
+    private void renderProtocolError(JsonNode root) {
+        JsonNode error = root == null ? null : root.get("error");
+        String code = Jsons.text(error, "code", "unknown");
+        String message = Jsons.text(error, "message", "Unknown protocol error");
+        if ("no_activity".equals(code)) {
+            append("⚠️ " + message + " (bring app to foreground, then retry Fetch View Tree)");
+            return;
+        }
+        append("⚠️ " + code + ": " + message);
     }
 
     private void renderViewTree(JsonNode payload) {
@@ -791,19 +814,6 @@ public final class DesktopFrame extends JFrame {
         }
     }
 
-    private void renderMemory(JsonNode payload) {
-        if (payload == null) return;
-        memoryArea.setText(
-            "Java used(MB): " + Jsons.integer(payload, "javaUsedMb", 0) + "\n" +
-                "Java max(MB): " + Jsons.integer(payload, "javaMaxMb", 0) + "\n" +
-                "Native heap(MB): " + Jsons.integer(payload, "nativeHeapMb", 0) + "\n" +
-                "Total PSS(KB): " + Jsons.integer(payload, "totalPssKb", 0) + "\n" +
-                "Native PSS(KB): " + Jsons.integer(payload, "nativePssKb", 0) + "\n" +
-                "Dalvik PSS(KB): " + Jsons.integer(payload, "dalvikPssKb", 0) + "\n" +
-                "Other PSS(KB): " + Jsons.integer(payload, "otherPssKb", 0)
-        );
-    }
-
     private void renderMocks(JsonNode payload) {
         mockTableModel.setRowCount(0);
         if (payload == null || payload.get("items") == null || !payload.get("items").isArray()) return;
@@ -849,10 +859,6 @@ public final class DesktopFrame extends JFrame {
 
     private void renderLeakEvent(JsonNode payload) {
         if (payload == null) return;
-        JsonNode memory = payload.get("memoryStats");
-        if (memory != null && memory.isObject()) {
-            renderMemory(memory);
-        }
         JsonNode list = payload.get("watches");
         if (list != null && list.isObject()) {
             renderWatches(list);
@@ -1424,6 +1430,21 @@ public final class DesktopFrame extends JFrame {
     }
 
     private void showError(Exception exception) {
-        JOptionPane.showMessageDialog(this, exception.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+        String message = exception.getMessage();
+        if (exception instanceof ConnectException && "127.0.0.1".equals(hostField.getText().trim())) {
+            message = "Connection refused: localhost:"
+                + portField.getText().trim()
+                + " is not mapped to device port.\n\n"
+                + "Fix options:\n"
+                + "1) USB: adb -s <device-id> forward tcp:"
+                + portField.getText().trim()
+                + " tcp:"
+                + portField.getText().trim()
+                + "\n"
+                + "2) LAN: use app's host:port from DebugKit.describeState() in the Host field.\n\n"
+                + "Original error: "
+                + exception.getMessage();
+        }
+        JOptionPane.showMessageDialog(this, message, "Error", JOptionPane.ERROR_MESSAGE);
     }
 }

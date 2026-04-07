@@ -7,7 +7,6 @@ It complements Android Studio tooling instead of replacing it.
 
 - In-app debug server (TCP, LAN)
 - View tree export for current foreground Activity
-- Memory sampling (Java / Native / PSS)
 - Leak watch list for retained objects
 - In-app network mock rule registry
 - Desktop panel for inspection and control
@@ -163,7 +162,7 @@ dependencies {
 1. App builds successfully after adding `debugkit` dependency.
 2. `DebugKit.install(...)` is called in `Application`.
 3. App can show `host:port` from `DebugKit.describeState()`.
-4. Desktop can connect and fetch View Tree / Memory / Leak list.
+4. Desktop can connect and fetch View Tree / Leak list.
 
 ### Common pitfalls (external app)
 
@@ -199,13 +198,21 @@ Or run `com.debugtools.desktop.DesktopMain` from IDE.
 
 1. `Connect` succeeds in desktop.
 2. `Fetch View Tree` returns current Activity hierarchy.
-3. `Fetch Memory` shows Java/Native/PSS numbers.
-4. `HTTP Mock` tab can set/list/clear mock rules.
-5. `Memory Leak` tab shows watch list and retained entries.
+3. `HTTP Mock` tab can set/list/clear mock rules.
+4. `Memory Leak` tab shows watch list and retained entries.
 
 ## Common issues
 
 - `Cannot connect`: make sure phone and desktop are on same LAN, and port is reachable.
+- `Connection refused` on `127.0.0.1:4939`: localhost has no listener unless port forward is set. Use:
+
+```bash
+adb devices
+adb -s <device-id> forward tcp:4939 tcp:4939
+nc -zv 127.0.0.1 4939
+```
+
+  Or use LAN mode directly: fill desktop `Host` with app `DebugKit.describeState().host` (not `127.0.0.1`).
 - `No view tree`: ensure app has a foreground Activity when requesting.
 - `Mock not hit`: verify exact `method + path` match with request.
 - `Leak list empty`: call `DebugKit.watch(...)`, then trigger GC and refresh watches.
