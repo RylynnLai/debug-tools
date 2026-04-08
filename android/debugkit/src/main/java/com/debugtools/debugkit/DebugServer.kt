@@ -127,6 +127,11 @@ internal class DebugServer(
                 }
             }
             "list_mocks" -> ok(request.id, "mock_list", mocksToJson(mockRegistry.all()))
+            "list_http_traffic" -> ok(request.id, "http_traffic_list", httpTrafficToJson(DebugKit.httpTrafficRegistry().all()))
+            "clear_http_traffic" -> {
+                DebugKit.httpTrafficRegistry().clear()
+                ok(request.id, "http_traffic_list", httpTrafficToJson(emptyList()))
+            }
             "set_mock" -> {
                 val method = DebugProtocol.readString(request.raw, "method") ?: "GET"
                 val path = DebugProtocol.readString(request.raw, "path") ?: return error(request.id, "bad_request", "path required")
@@ -162,11 +167,15 @@ internal class DebugServer(
     private fun mocksToJson(items: List<MockRule>): String {
         return items.joinToString(prefix = """{"items":[""", separator = ",", postfix = "]}") { it.toJson() }
     }
+
+    private fun httpTrafficToJson(items: List<HttpTrafficRecord>): String {
+        return items.joinToString(prefix = """{"items":[""", separator = ",", postfix = "]}") { it.toJson() }
+    }
 }
 
 
 private fun ViewTreeSnapshot.toJson(): String {
-    return """{"activity":"${Json.escape(activity)}","tree":${tree.toJson()}}"""
+    return """{"activity":"${Json.escape(activity)}","tree":${tree.toJson()},"diagnostics":${diagnostics.toJson()}}"""
 }
 
 private fun ViewPreviewSnapshot.toJson(): String {
@@ -174,7 +183,11 @@ private fun ViewPreviewSnapshot.toJson(): String {
 }
 
 private fun ViewNode.toJson(): String {
-    return """{"path":"${Json.escape(path)}","id":"${Json.escape(id)}","idValue":$idValue,"className":"${Json.escape(className)}","visible":$visible,"visibility":"${Json.escape(visibility)}","enabled":$enabled,"clickable":$clickable,"focusable":$focusable,"left":$left,"top":$top,"width":$width,"height":$height,"alpha":$alpha,"label":"${Json.escape(label)}","contentDescription":"${Json.escape(contentDescription)}","bgColor":"${Json.escape(bgColor)}","marginLeft":$marginLeft,"marginTop":$marginTop,"marginRight":$marginRight,"marginBottom":$marginBottom,"paddingLeft":$paddingLeft,"paddingTop":$paddingTop,"paddingRight":$paddingRight,"paddingBottom":$paddingBottom,"textColor":"${Json.escape(textColor)}","textSizeSp":$textSizeSp,"hint":"${Json.escape(hint)}","cornerRadiusPx":$cornerRadiusPx,"iconHint":"${Json.escape(iconHint)}","imageBase64":"${Json.escape(imageBase64)}","children":[${children.joinToString(",") { it.toJson() }}]}"""
+    return """{"path":"${Json.escape(path)}","id":"${Json.escape(id)}","idValue":$idValue,"className":"${Json.escape(className)}","visible":$visible,"visibility":"${Json.escape(visibility)}","enabled":$enabled,"clickable":$clickable,"focusable":$focusable,"left":$left,"top":$top,"width":$width,"height":$height,"alpha":$alpha,"label":"${Json.escape(label)}","contentDescription":"${Json.escape(contentDescription)}","bgColor":"${Json.escape(bgColor)}","marginLeft":$marginLeft,"marginTop":$marginTop,"marginRight":$marginRight,"marginBottom":$marginBottom,"paddingLeft":$paddingLeft,"paddingTop":$paddingTop,"paddingRight":$paddingRight,"paddingBottom":$paddingBottom,"textColor":"${Json.escape(textColor)}","textSizeSp":$textSizeSp,"hint":"${Json.escape(hint)}","cornerRadiusPx":$cornerRadiusPx,"iconHint":"${Json.escape(iconHint)}","imageBase64":"${Json.escape(imageBase64)}","nodeType":"${Json.escape(nodeType)}","composeNodeId":$composeNodeId,"testTag":"${Json.escape(testTag)}","children":[${children.joinToString(",") { it.toJson() }}]}"""
+}
+
+private fun ViewTreeDiagnostics.toJson(): String {
+    return """{"debuggable":$debuggable,"composeRuntimePresent":$composeRuntimePresent,"composeHostViews":$composeHostViews,"composeSemanticsNodes":$composeSemanticsNodes,"composeReflectionOk":$composeReflectionOk,"composeReflectionError":"${Json.escape(composeReflectionError)}"}"""
 }
 
 private fun MockRule.toJson(): String {
@@ -182,6 +195,13 @@ private fun MockRule.toJson(): String {
         """"${Json.escape(it.key)}":"${Json.escape(it.value)}""""
     }
     return """{"method":"${Json.escape(method)}","path":"${Json.escape(path)}","statusCode":$statusCode,"body":"${Json.escape(body)}","headers":{$headersJson}}"""
+}
+
+private fun HttpTrafficRecord.toJson(): String {
+    val headersJson = responseHeaders.entries.joinToString(",") {
+        """"${Json.escape(it.key)}":"${Json.escape(it.value)}""""
+    }
+    return """{"timestampMs":$timestampMs,"method":"${Json.escape(method)}","host":"${Json.escape(host)}","path":"${Json.escape(path)}","query":"${Json.escape(query)}","statusCode":$statusCode,"requestBody":"${Json.escape(requestBody)}","responseBody":"${Json.escape(responseBody)}","responseHeaders":{$headersJson},"mocked":$mocked}"""
 }
 
 private fun LeakSnapshot.toJson(): String {

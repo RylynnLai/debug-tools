@@ -9,6 +9,7 @@ It complements Android Studio tooling instead of replacing it.
 - View tree export for current foreground Activity
 - Leak watch list for retained objects
 - In-app network mock rule registry
+- HTTP traffic capture for mock selection/editing
 - Desktop panel for inspection and control
 
 ## Repository layout
@@ -75,7 +76,14 @@ Stop when done:
 DebugVpnController.stop(this)
 ```
 
-`DebugMockInterceptor` is still available as an optional fallback for apps/environments where VPN mode is not enabled.
+Current VPN mode behavior:
+
+- Transparent DNS relay for classic UDP/53 lookups.
+- Transparent TCP passthrough for non-HTTP traffic such as HTTPS.
+- Transparent cleartext HTTP interception on port `80`, including path-based mock matching.
+- HTTPS payloads are still opaque passthrough traffic and cannot be body-mocked in the current MVP.
+
+`DebugMockInterceptor` is still available as an optional fallback when you need app-level interception instead of VPN-mode transport interception.
 
 ### 5) Watch suspicious objects for leaks
 
@@ -177,7 +185,7 @@ dependencies {
 
 - `Project with path ':debugkit' not found`: check `settings.gradle.kts` include order and path.
 - Repository resolution errors with `FAIL_ON_PROJECT_REPOS`: add repositories in `dependencyResolutionManagement`, not module build files.
-- Mock not working in VPN mode: HTTP cleartext can be mocked by path; HTTPS payload mocking requires MITM support (not in current MVP).
+- Mock not working in VPN mode: only cleartext HTTP on port `80` can be mocked by path; HTTPS remains passthrough and needs MITM support for payload mocking.
 - Connected but no data: verify app has foreground Activity and both devices are on the same LAN.
 
 ## Run and connect
@@ -188,14 +196,86 @@ Run your app on a device in the same LAN as desktop.
 
 ### Start desktop client
 
-From repo root:
+#### Option A — Native app (recommended) ✅
+
+Pack the desktop into a **self-contained `.app` bundle** that embeds its own JRE.  
+No Java installation required on the machine that runs the panel.
 
 ```bash
-cd /Users/llm/Documents/debug-tools
-./gradlew :desktop:run
+# Build + install to /Applications/DebugTools.app
+cd /path/to/debug-tools
+./gradlew :desktop:installDesktopApp
 ```
 
-Or run `com.debugtools.desktop.DesktopMain` from IDE.
+After that, launch it any way you like — **no build tools, no Java, no path setup**:
+
+| Method | Command |
+|---|---|
+| Finder | Double-click `/Applications/DebugTools.app` |
+| Terminal | `open /Applications/DebugTools.app` |
+| Spotlight | ⌘ Space → "DebugTools" |
+| Gradle (external app) | `./gradlew launchDebugDesktop` ¹ |
+
+> ¹ Requires the convention script — see **Option C** below.
+
+To rebuild after updating debug-tools, just re-run `installDesktopApp`.
+
+#### Option B — Script-based install (lighter, needs Java on PATH)
+
+```bash
+cd /path/to/debug-tools
+./gradlew :desktop:installDebugDesktop
+```
+
+Installs to `~/.debug-tools/bin/debug-desktop` and symlinks into `/usr/local/bin/`:
+
+```bash
+debug-desktop          # available in any terminal window
+```
+
+#### Option C — Convention script (zero copy-paste in external apps)
+
+Apply the pre-built convention script so any developer on your team can run:
+
+```bash
+./gradlew launchDebugDesktop
+```
+
+**1) Record the debug-tools path in `local.properties`** (never commit this file):
+
+```properties
+debug.tools.path=/absolute/path/to/debug-tools
+```
+
+**2) Apply in your root `build.gradle.kts`:**
+
+```kotlin
+val debugToolsPath: String? = java.util.Properties()
+    .also { p ->
+        val f = rootProject.file("local.properties")
+        if (f.exists()) f.inputStream().use(p::load)
+    }
+    .getProperty("debug.tools.path")
+
+if (!debugToolsPath.isNullOrBlank()) {
+    apply(from = "$debugToolsPath/debug-tools.gradle.kts")
+}
+```
+
+The script auto-selects the best launcher (native app → script install → source):
+
+```
+./gradlew launchDebugDesktop     # launch panel
+./gradlew debugToolsHelp         # print integration help
+```
+
+#### Option D — From the debug-tools repo (quick, no setup)
+
+```bash
+cd /path/to/debug-tools
+./run-desktop.sh
+# or: ./gradlew :desktop:run
+```
 
 ### Connect desktop to app
 
@@ -207,7 +287,7 @@ Or run `com.debugtools.desktop.DesktopMain` from IDE.
 
 1. `Connect` succeeds in desktop.
 2. `Fetch View Tree` returns current Activity hierarchy.
-3. `HTTP Mock` tab can set/list/clear mock rules.
+3. `HTTP Mock` tab will automatically show proxied API traffic. Select a record, edit the generated mock, then enable it. Subsequent requests with the same `method + path` will use the mock until you clear it.
 4. `Memory Leak` tab shows watch list and retained entries.
 
 ## Common issues
@@ -223,6 +303,7 @@ nc -zv 127.0.0.1 4939
 
   Or use LAN mode directly: fill desktop `Host` with app `DebugKit.describeState().host` (not `127.0.0.1`).
 - `No view tree`: ensure app has a foreground Activity when requesting.
+- Compose screen nodes are sparse/missing: update to latest debugkit and check `view_tree.payload.diagnostics` (`composeHostViews`, `composeSemanticsNodes`, `composeReflectionOk`). Add `testTag`/`contentDescription` on critical Compose nodes when needed.
 - `Mock not hit`: verify exact `method + path` match with request.
 - `Leak list empty`: call `DebugKit.watch(...)`, then trigger GC and refresh watches.
 

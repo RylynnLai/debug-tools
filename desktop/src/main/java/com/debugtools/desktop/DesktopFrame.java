@@ -41,7 +41,9 @@ import javax.imageio.ImageIO;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
 import javax.swing.JComponent;
+import javax.swing.DefaultComboBoxModel;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
@@ -54,6 +56,7 @@ import javax.swing.JTextArea;
 import javax.swing.JTextField;
 import javax.swing.JTable;
 import javax.swing.JTree;
+import javax.swing.ListSelectionModel;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.table.DefaultTableModel;
@@ -71,15 +74,26 @@ public final class DesktopFrame extends JFrame {
     });
     private final JTextField hostField = new JTextField("127.0.0.1");
     private final JTextField portField = new JTextField("4939");
+    private final JButton scanButton = new JButton("Scan Apps");
+    private final JButton connectSelectedButton = new JButton("Connect Selected");
+    private final DefaultComboBoxModel<DiscoveredTarget> discoveredTargetModel = new DefaultComboBoxModel<>();
+    private final JComboBox<DiscoveredTarget> discoveredTargetBox = new JComboBox<>(discoveredTargetModel);
     private final JTextArea outputArea = new JTextArea();
     private final JTextField methodField = new JTextField("GET");
     private final JTextField pathField = new JTextField("/api/profile");
     private final JTextField statusField = new JTextField("200");
     private final JTextArea bodyArea = new JTextArea("{\"name\":\"debug-user\"}");
+    private final JTextArea requestBodyArea = new JTextArea();
     private final DefaultMutableTreeNode viewRoot = new DefaultMutableTreeNode("No view tree yet");
     private final DefaultTreeModel viewTreeModel = new DefaultTreeModel(viewRoot);
     private final JTree viewTree = new JTree(viewTreeModel);
     private final DefaultTableModel mockTableModel = new DefaultTableModel(new Object[]{"Method", "Path", "Status", "Body"}, 0) {
+        @Override
+        public boolean isCellEditable(int row, int column) {
+            return false;
+        }
+    };
+    private final DefaultTableModel trafficTableModel = new DefaultTableModel(new Object[]{"Time", "Method", "Host", "Path", "Status", "Source"}, 0) {
         @Override
         public boolean isCellEditable(int row, int column) {
             return false;
@@ -92,7 +106,10 @@ public final class DesktopFrame extends JFrame {
         }
     };
     private final JTable mockTable = new JTable(mockTableModel);
+    private final JTable trafficTable = new JTable(trafficTableModel);
     private final JTable watchTable = new JTable(watchTableModel);
+    private final JLabel trafficSummaryLabel = new JLabel("Traffic: waiting for data");
+    private final Timer trafficPollingTimer = new Timer(1500, event -> send("list_http_traffic", ""));
     private final JLabel retainedCountLabel = new JLabel("Retained objects: -");
     private final JTextArea leakHistoryArea = new JTextArea("No leak records yet");
     private final JCheckBox leakTrackingCheck = new JCheckBox("Track While Running (5s)");
@@ -131,6 +148,7 @@ public final class DesktopFrame extends JFrame {
     private final JTextField selectedPaddingBottomField = new JTextField();
     private final JButton applyViewChangesButton = new JButton("Apply View Changes");
     private final List<ViewTreeItem> flatViewItems = new ArrayList<>();
+    private final List<HttpTrafficItem> trafficItems = new ArrayList<>();
     private final Map<ViewTreeItem, DefaultMutableTreeNode> viewTreeNodeMap = new HashMap<>();
     private int treeOriginLeft = 0;
     private int treeOriginTop = 0;
@@ -142,6 +160,7 @@ public final class DesktopFrame extends JFrame {
     private static final double DRAG_ROTATION_SENSITIVITY = 0.35;
     private static final DateTimeFormatter LEAK_TIME_FORMAT = DateTimeFormatter.ofPattern("HH:mm:ss");
     private static final DateTimeFormatter ANALYSIS_TIME_FORMAT = DateTimeFormatter.ofPattern("MM-dd HH:mm:ss");
+    private static final int SCAN_TIMEOUT_MS = 180;
 
     public DesktopFrame() {
         super("Debug Tools Desktop");
@@ -164,16 +183,21 @@ public final class DesktopFrame extends JFrame {
 
         bindPreview3dControls();
         bindLeakTrackingControls();
+        bindTrafficControls();
         viewTree.addTreeSelectionListener(event -> onViewNodeSelected());
+        connectSelectedButton.setEnabled(false);
+        SwingUtilities.invokeLater(this::scanConnectableApps);
     }
 
     private JPanel buildTopPanel() {
-        JPanel panel = new JPanel(new GridLayout(2, 1, 8, 8));
+        JPanel panel = new JPanel(new GridLayout(3, 1, 8, 8));
         panel.setBorder(BorderFactory.createEmptyBorder(12, 12, 0, 12));
 
-        JPanel connectPanel = new JPanel(new GridLayout(1, 5, 8, 8));
+        JPanel connectPanel = new JPanel(new GridLayout(1, 7, 8, 8));
         JButton connectButton = new JButton("Connect");
         connectButton.addActionListener(event -> connect());
+        scanButton.addActionListener(event -> scanConnectableApps());
+        connectSelectedButton.addActionListener(event -> connectSelectedTarget());
         JButton viewButton = new JButton("Fetch View Tree");
         viewButton.addActionListener(event -> {
             send("get_view_tree", "");
@@ -187,12 +211,21 @@ public final class DesktopFrame extends JFrame {
         connectPanel.add(new JLabel("Port"));
         connectPanel.add(portField);
         connectPanel.add(connectButton);
+        connectPanel.add(scanButton);
+
+        JPanel discoveredPanel = new JPanel(new GridLayout(1, 3, 8, 8));
+        discoveredTargetModel.addElement(DiscoveredTarget.placeholder("No scanned target yet"));
+        discoveredTargetBox.setSelectedIndex(0);
+        discoveredPanel.add(new JLabel("Discovered"));
+        discoveredPanel.add(discoveredTargetBox);
+        discoveredPanel.add(connectSelectedButton);
 
         JPanel actionPanel = new JPanel(new GridLayout(1, 2, 8, 8));
         actionPanel.add(viewButton);
         actionPanel.add(previewButton);
 
         panel.add(connectPanel);
+        panel.add(discoveredPanel);
         panel.add(actionPanel);
         return panel;
     }
@@ -299,7 +332,7 @@ public final class DesktopFrame extends JFrame {
 
     private JPanel buildHttpMockPanel() {
         JPanel panel = new JPanel(new BorderLayout(8, 8));
-        JPanel form = new JPanel(new GridLayout(7, 1, 8, 8));
+        JPanel editorForm = new JPanel(new GridLayout(8, 1, 8, 8));
 
         JButton applyMockButton = new JButton("Apply Mock");
         applyMockButton.addActionListener(event -> setMock());
@@ -307,18 +340,45 @@ public final class DesktopFrame extends JFrame {
         refreshMockListButton.addActionListener(event -> send("list_mocks", ""));
         JButton clearMockButton = new JButton("Clear Mock");
         clearMockButton.addActionListener(event -> clearMock());
+        JButton refreshTrafficButton = new JButton("Refresh Traffic");
+        refreshTrafficButton.addActionListener(event -> send("list_http_traffic", ""));
+        JButton clearTrafficButton = new JButton("Clear Traffic");
+        clearTrafficButton.addActionListener(event -> send("clear_http_traffic", ""));
 
-        form.add(labeled("Method", methodField));
-        form.add(labeled("Path", pathField));
-        form.add(labeled("Status", statusField));
-        form.add(new JLabel("Body"));
-        form.add(new JScrollPane(bodyArea));
-        form.add(applyMockButton);
-        form.add(refreshMockListButton);
-        form.add(new JScrollPane(mockTable));
+        trafficSummaryLabel.setBorder(BorderFactory.createEmptyBorder(0, 4, 0, 0));
+        requestBodyArea.setEditable(false);
+        trafficTable.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
 
-        panel.add(form, BorderLayout.CENTER);
-        panel.add(clearMockButton, BorderLayout.SOUTH);
+        JPanel trafficActions = new JPanel(new GridLayout(1, 2, 8, 8));
+        trafficActions.add(refreshTrafficButton);
+        trafficActions.add(clearTrafficButton);
+
+        JPanel trafficPanel = new JPanel(new BorderLayout(8, 8));
+        trafficPanel.add(trafficSummaryLabel, BorderLayout.NORTH);
+        trafficPanel.add(new JScrollPane(trafficTable), BorderLayout.CENTER);
+        trafficPanel.add(trafficActions, BorderLayout.SOUTH);
+
+        editorForm.add(labeled("Method", methodField));
+        editorForm.add(labeled("Path", pathField));
+        editorForm.add(labeled("Status", statusField));
+        editorForm.add(new JLabel("Mock Body"));
+        editorForm.add(new JScrollPane(bodyArea));
+        editorForm.add(new JLabel("Selected Request Body"));
+        editorForm.add(new JScrollPane(requestBodyArea));
+
+        JPanel mockActionPanel = new JPanel(new GridLayout(1, 3, 8, 8));
+        mockActionPanel.add(applyMockButton);
+        mockActionPanel.add(refreshMockListButton);
+        mockActionPanel.add(clearMockButton);
+
+        JPanel editorPanel = new JPanel(new BorderLayout(8, 8));
+        editorPanel.add(editorForm, BorderLayout.NORTH);
+        editorPanel.add(new JScrollPane(mockTable), BorderLayout.CENTER);
+        editorPanel.add(mockActionPanel, BorderLayout.SOUTH);
+
+        JSplitPane splitPane = new JSplitPane(JSplitPane.VERTICAL_SPLIT, trafficPanel, editorPanel);
+        splitPane.setResizeWeight(0.48);
+        panel.add(splitPane, BorderLayout.CENTER);
         return panel;
     }
 
@@ -348,6 +408,16 @@ public final class DesktopFrame extends JFrame {
                 leakPollingTimer.stop();
                 append("⏸ Leak tracking stopped");
             }
+        });
+    }
+
+    private void bindTrafficControls() {
+        trafficPollingTimer.setRepeats(true);
+        trafficTable.getSelectionModel().addListSelectionListener(event -> {
+            if (event.getValueIsAdjusting()) return;
+            int selectedRow = trafficTable.getSelectedRow();
+            if (selectedRow < 0 || selectedRow >= trafficItems.size()) return;
+            populateMockEditorFromTraffic(trafficItems.get(selectedRow));
         });
     }
 
@@ -405,12 +475,25 @@ public final class DesktopFrame extends JFrame {
         MouseAdapter dragRotateHandler = new MouseAdapter() {
             private int lastX;
             private int lastY;
-            private boolean dragging;
+            private boolean draggingRotate;
+            private boolean draggingPan;
+
+            private boolean isPanGesture(MouseEvent event) {
+                return SwingUtilities.isRightMouseButton(event)
+                    || SwingUtilities.isMiddleMouseButton(event)
+                    || event.isShiftDown();
+            }
 
             @Override
             public void mousePressed(MouseEvent event) {
-                if (!SwingUtilities.isLeftMouseButton(event) || !enable3dCheck.isSelected()) return;
-                dragging = true;
+                if (!enable3dCheck.isSelected()) return;
+                if (isPanGesture(event)) {
+                    draggingPan = true;
+                } else if (SwingUtilities.isLeftMouseButton(event)) {
+                    draggingRotate = true;
+                } else {
+                    return;
+                }
                 lastX = event.getX();
                 lastY = event.getY();
                 previewPanel.setInteracting(true);
@@ -418,11 +501,16 @@ public final class DesktopFrame extends JFrame {
 
             @Override
             public void mouseDragged(MouseEvent event) {
-                if (!dragging || !enable3dCheck.isSelected()) return;
+                if ((!draggingRotate && !draggingPan) || !enable3dCheck.isSelected()) return;
                 int deltaX = event.getX() - lastX;
                 int deltaY = event.getY() - lastY;
                 lastX = event.getX();
                 lastY = event.getY();
+
+                if (draggingPan) {
+                    previewPanel.adjustPan(deltaX, deltaY);
+                    return;
+                }
 
                 int nextYaw = clampSliderValue(yawSlider, yawSlider.getValue() + (int) Math.round(deltaX * DRAG_ROTATION_SENSITIVITY));
                 int nextPitch = clampSliderValue(pitchSlider, pitchSlider.getValue() + (int) Math.round(deltaY * DRAG_ROTATION_SENSITIVITY));
@@ -432,7 +520,8 @@ public final class DesktopFrame extends JFrame {
 
             @Override
             public void mouseReleased(MouseEvent event) {
-                dragging = false;
+                draggingRotate = false;
+                draggingPan = false;
                 previewPanel.setInteracting(false);
             }
 
@@ -442,6 +531,7 @@ public final class DesktopFrame extends JFrame {
                 if (event.getClickCount() == 2) {
                     yawSlider.setValue(DEFAULT_YAW_DEGREES);
                     pitchSlider.setValue(DEFAULT_PITCH_DEGREES);
+                    previewPanel.resetCamera();
                     return;
                 }
                 ViewTreeItem picked = previewPanel.pickItemAt(event.getX(), event.getY());
@@ -452,6 +542,16 @@ public final class DesktopFrame extends JFrame {
         };
         previewPanel.addMouseListener(dragRotateHandler);
         previewPanel.addMouseMotionListener(dragRotateHandler);
+        previewPanel.addMouseWheelListener(event -> {
+            if (!enable3dCheck.isSelected()) return;
+            if (event.isControlDown()) {
+                int nextDepth = clampSliderValue(depthSlider, depthSlider.getValue() - event.getWheelRotation());
+                if (nextDepth != depthSlider.getValue()) depthSlider.setValue(nextDepth);
+                return;
+            }
+            double delta = -event.getPreciseWheelRotation() * 0.08;
+            previewPanel.adjustZoom(delta);
+        });
     }
 
     private int clampSliderValue(JSlider slider, int value) {
@@ -485,6 +585,11 @@ public final class DesktopFrame extends JFrame {
                 client.connect(host, port);
                 SwingUtilities.invokeLater(() -> {
                     append("✅ Connected to " + host + ":" + port);
+                    send("list_http_traffic", "");
+                    send("list_mocks", "");
+                    if (!trafficPollingTimer.isRunning()) {
+                        trafficPollingTimer.start();
+                    }
                     if (leakTrackingCheck.isSelected() && !leakPollingTimer.isRunning()) {
                         leakPollingTimer.start();
                     }
@@ -495,18 +600,76 @@ public final class DesktopFrame extends JFrame {
         });
     }
 
+    private void scanConnectableApps() {
+        int preferredPortValue;
+        try {
+            preferredPortValue = Integer.parseInt(portField.getText().trim());
+        } catch (NumberFormatException e) {
+            preferredPortValue = 4939;
+        }
+        final int preferredPort = preferredPortValue;
+        final String manualHost = hostField.getText().trim();
+        scanButton.setEnabled(false);
+        connectSelectedButton.setEnabled(false);
+        append("Scanning and preparing adb forward...");
+        networkExecutor.submit(() -> {
+            AdbBridge.PrepareResult adbResult = AdbBridge.prepareForwards(preferredPort);
+            List<ConnectionScanner.SeedEndpoint> seeded = new ArrayList<>();
+            for (AdbBridge.ForwardCandidate candidate : adbResult.forwardCandidates) {
+                seeded.add(new ConnectionScanner.SeedEndpoint(candidate.host, candidate.port, candidate.source));
+            }
+            List<ConnectionScanner.DiscoveredEndpoint> found = ConnectionScanner.scan(
+                preferredPort,
+                SCAN_TIMEOUT_MS,
+                seeded,
+                manualHost
+            );
+            SwingUtilities.invokeLater(() -> {
+                for (String note : adbResult.notes) {
+                    append(note);
+                }
+                discoveredTargetModel.removeAllElements();
+                if (found.isEmpty()) {
+                    discoveredTargetModel.addElement(DiscoveredTarget.placeholder("No connectable app found"));
+                    append("No DebugKit server discovered. Keep app running, then retry Scan Apps.");
+                } else {
+                    for (ConnectionScanner.DiscoveredEndpoint endpoint : found) {
+                        discoveredTargetModel.addElement(DiscoveredTarget.from(endpoint));
+                    }
+                    discoveredTargetBox.setSelectedIndex(0);
+                    append("Found " + found.size() + " connectable endpoint(s). Select one then click Connect Selected.");
+                    connectSelectedButton.setEnabled(true);
+                }
+                scanButton.setEnabled(true);
+            });
+        });
+    }
+
+    private void connectSelectedTarget() {
+        Object selected = discoveredTargetBox.getSelectedItem();
+        if (!(selected instanceof DiscoveredTarget target) || target.placeholder) {
+            JOptionPane.showMessageDialog(this, "No scanned target selected", "Info", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
+        hostField.setText(target.host);
+        portField.setText(String.valueOf(target.port));
+        connect();
+    }
+
     private void setMock() {
         String payload = ",\"method\":\"" + Jsons.escape(methodField.getText().trim()) +
             "\",\"path\":\"" + Jsons.escape(pathField.getText().trim()) +
             "\",\"statusCode\":" + Integer.parseInt(statusField.getText().trim()) +
             ",\"body\":\"" + Jsons.escape(bodyArea.getText()) + "\"";
         send("set_mock", payload);
+        send("list_http_traffic", "");
     }
 
     private void clearMock() {
         String payload = ",\"method\":\"" + Jsons.escape(methodField.getText().trim()) +
             "\",\"path\":\"" + Jsons.escape(pathField.getText().trim()) + "\"";
         send("clear_mock", payload);
+        send("list_http_traffic", "");
     }
 
     private void send(String type, String payload) {
@@ -559,6 +722,7 @@ public final class DesktopFrame extends JFrame {
             case "view_tree" -> renderViewTree(payload);
             case "view_preview" -> renderViewPreview(payload);
             case "view_updated" -> append("✅ View updated");
+            case "http_traffic_list" -> renderHttpTraffic(payload);
             case "mock_list", "mock_saved" -> renderMocks(payload);
             case "watch_list" -> renderWatches(payload);
             case "leak_event" -> renderLeakEvent(payload);
@@ -583,6 +747,18 @@ public final class DesktopFrame extends JFrame {
         if (payload == null || payload.get("tree") == null) return;
         String previousPath = selectedPathField.getText().trim();
         String activity = Jsons.text(payload, "activity", "UnknownActivity");
+        JsonNode diagnostics = payload.get("diagnostics");
+        if (diagnostics != null && diagnostics.isObject()) {
+            append(
+                "View diagnostics: composeHosts=" + Jsons.integer(diagnostics, "composeHostViews", 0) +
+                    ", composeNodes=" + Jsons.integer(diagnostics, "composeSemanticsNodes", 0) +
+                    ", reflectionOk=" + (diagnostics.get("composeReflectionOk") != null && diagnostics.get("composeReflectionOk").asBoolean(false))
+            );
+            String composeError = Jsons.text(diagnostics, "composeReflectionError", "");
+            if (!composeError.isEmpty()) {
+                append("⚠️ Compose reflection error: " + composeError);
+            }
+        }
         JsonNode rootNode = payload.get("tree");
         treeOriginLeft = Jsons.integer(rootNode, "left", 0);
         treeOriginTop = Jsons.integer(rootNode, "top", 0);
@@ -616,8 +792,14 @@ public final class DesktopFrame extends JFrame {
 
     private void buildViewNodeTree(JsonNode node, DefaultMutableTreeNode parent, int depth, String path) {
         String className = Jsons.text(node, "className", "View");
-        String label = simpleClassName(className) +
-            "#" + Jsons.text(node, "id", "no-id") +
+        String nodeType = Jsons.text(node, "nodeType", "view");
+        String testTag = Jsons.text(node, "testTag", "");
+        int composeNodeId = Jsons.integer(node, "composeNodeId", -1);
+        String displayId = "compose".equals(nodeType)
+            ? (!testTag.isEmpty() ? "tag=" + testTag : "node=" + composeNodeId)
+            : Jsons.text(node, "id", "no-id");
+        String label = ("compose".equals(nodeType) ? "Compose" : simpleClassName(className)) +
+            "#" + displayId +
             " [" + Jsons.integer(node, "width", 0) + "x" + Jsons.integer(node, "height", 0) + "]";
         int absoluteLeft = Jsons.integer(node, "left", 0);
         int absoluteTop = Jsons.integer(node, "top", 0);
@@ -653,7 +835,10 @@ public final class DesktopFrame extends JFrame {
             Jsons.integer(node, "paddingLeft", 0),
             Jsons.integer(node, "paddingTop", 0),
             Jsons.integer(node, "paddingRight", 0),
-            Jsons.integer(node, "paddingBottom", 0)
+            Jsons.integer(node, "paddingBottom", 0),
+            nodeType,
+            composeNodeId,
+            testTag
         );
         DefaultMutableTreeNode current = new DefaultMutableTreeNode(item);
         parent.add(current);
@@ -709,6 +894,11 @@ public final class DesktopFrame extends JFrame {
         selectedPaddingTopField.setText(String.valueOf(item.paddingTop));
         selectedPaddingRightField.setText(String.valueOf(item.paddingRight));
         selectedPaddingBottomField.setText(String.valueOf(item.paddingBottom));
+        applyViewChangesButton.setEnabled(!"compose".equals(item.nodeType));
+        if ("compose".equals(item.nodeType)) {
+            selectedIdField.setText(item.testTag.isEmpty() ? ("compose-" + item.composeNodeId) : item.testTag);
+            selectedHintField.setText(item.testTag);
+        }
 
         DefaultMutableTreeNode treeNode = viewTreeNodeMap.get(item);
         if (treeNode != null) {
@@ -727,6 +917,11 @@ public final class DesktopFrame extends JFrame {
         String selectedPath = selectedPathField.getText().trim();
         if (selectedPath.isEmpty()) {
             append("⚠️ Select a view node first.");
+            return;
+        }
+        ViewTreeItem selectedItem = findItemByPath(selectedPath);
+        if (selectedItem != null && "compose".equals(selectedItem.nodeType)) {
+            append("⚠️ Compose semantics node is read-only for now.");
             return;
         }
         String label = selectedLabelField.getText();
@@ -827,6 +1022,58 @@ public final class DesktopFrame extends JFrame {
         }
     }
 
+    private void renderHttpTraffic(JsonNode payload) {
+        trafficTableModel.setRowCount(0);
+        trafficItems.clear();
+        if (payload == null || payload.get("items") == null || !payload.get("items").isArray()) {
+            trafficSummaryLabel.setText("Traffic: no records");
+            return;
+        }
+
+        for (JsonNode item : payload.get("items")) {
+            HttpTrafficItem trafficItem = new HttpTrafficItem(
+                item.get("timestampMs") != null ? item.get("timestampMs").asLong(0L) : 0L,
+                Jsons.text(item, "method", ""),
+                Jsons.text(item, "host", ""),
+                Jsons.text(item, "path", ""),
+                Jsons.text(item, "query", ""),
+                Jsons.integer(item, "statusCode", 0),
+                Jsons.text(item, "requestBody", ""),
+                Jsons.text(item, "responseBody", ""),
+                item.get("mocked") != null && item.get("mocked").asBoolean(false)
+            );
+            trafficItems.add(trafficItem);
+            trafficTableModel.addRow(new Object[]{
+                formatTrafficTime(trafficItem.timestampMs),
+                trafficItem.method,
+                trafficItem.host,
+                trafficItem.fullPath(),
+                trafficItem.statusCode,
+                trafficItem.mocked ? "Mock" : "Origin"
+            });
+        }
+
+        trafficSummaryLabel.setText("Traffic: " + trafficItems.size() + " records, selecting one will preload mock editor");
+        int selectedRow = trafficTable.getSelectedRow();
+        if (selectedRow >= 0 && selectedRow < trafficItems.size()) {
+            populateMockEditorFromTraffic(trafficItems.get(selectedRow));
+        }
+    }
+
+    private void populateMockEditorFromTraffic(HttpTrafficItem item) {
+        methodField.setText(item.method);
+        pathField.setText(item.path);
+        statusField.setText(String.valueOf(item.statusCode <= 0 ? 200 : item.statusCode));
+        bodyArea.setText(item.responseBody);
+        requestBodyArea.setText(item.requestBody);
+    }
+
+    private String formatTrafficTime(long timestampMs) {
+        if (timestampMs <= 0L) return "-";
+        return LocalDateTime.ofInstant(Instant.ofEpochMilli(timestampMs), ZoneId.systemDefault())
+            .format(LEAK_TIME_FORMAT);
+    }
+
     private void renderWatches(JsonNode payload) {
         watchTableModel.setRowCount(0);
         if (payload == null) return;
@@ -923,6 +1170,45 @@ public final class DesktopFrame extends JFrame {
             .format(ANALYSIS_TIME_FORMAT);
     }
 
+    private static final class HttpTrafficItem {
+        private final long timestampMs;
+        private final String method;
+        private final String host;
+        private final String path;
+        private final String query;
+        private final int statusCode;
+        private final String requestBody;
+        private final String responseBody;
+        private final boolean mocked;
+
+        private HttpTrafficItem(
+            long timestampMs,
+            String method,
+            String host,
+            String path,
+            String query,
+            int statusCode,
+            String requestBody,
+            String responseBody,
+            boolean mocked
+        ) {
+            this.timestampMs = timestampMs;
+            this.method = method;
+            this.host = host;
+            this.path = path;
+            this.query = query;
+            this.statusCode = statusCode;
+            this.requestBody = requestBody;
+            this.responseBody = responseBody;
+            this.mocked = mocked;
+        }
+
+        private String fullPath() {
+            if (query == null || query.isEmpty()) return path;
+            return path + "?" + query;
+        }
+    }
+
     private int maxDepth(List<ViewTreeItem> items) {
         int max = 0;
         for (ViewTreeItem item : items) {
@@ -974,6 +1260,9 @@ public final class DesktopFrame extends JFrame {
         private final int paddingTop;
         private final int paddingRight;
         private final int paddingBottom;
+        private final String nodeType;
+        private final int composeNodeId;
+        private final String testTag;
 
         private ViewTreeItem(
             String label,
@@ -1007,7 +1296,10 @@ public final class DesktopFrame extends JFrame {
             int paddingLeft,
             int paddingTop,
             int paddingRight,
-            int paddingBottom
+            int paddingBottom,
+            String nodeType,
+            int composeNodeId,
+            String testTag
         ) {
             this.label = label;
             this.relativeLeft = relativeLeft;
@@ -1041,6 +1333,9 @@ public final class DesktopFrame extends JFrame {
             this.paddingTop = paddingTop;
             this.paddingRight = paddingRight;
             this.paddingBottom = paddingBottom;
+            this.nodeType = nodeType;
+            this.composeNodeId = composeNodeId;
+            this.testTag = testTag;
         }
 
         @Override
@@ -1061,20 +1356,27 @@ public final class DesktopFrame extends JFrame {
         private int minDepth;
         private int maxDepth;
         private boolean interacting;
+        private double panX;
+        private double panY;
+        private double zoom = 1.0;
         private List<ProjectedLayer> renderedLayers = List.of();
         private final Map<String, BufferedImage> semanticLayerCache = new HashMap<>();
         private static final double LAYER_GAP_MULTIPLIER = 0.65;
         private static final double PERSPECTIVE_MULTIPLIER = 2.4;
         private static final int MAX_RENDERED_LAYERS = 180;
+        private static final double MIN_ZOOM = 0.6;
+        private static final double MAX_ZOOM = 2.6;
 
         private PreviewPanel() {
             setBackground(Color.DARK_GRAY);
             setPreferredSize(new Dimension(360, 640));
+            setToolTipText("3D: drag to rotate, Shift/right-drag to pan, wheel to zoom");
         }
 
         private void setImage(BufferedImage image) {
             this.image = image;
             this.highlight = null;
+            resetCamera();
             revalidate();
             repaint();
         }
@@ -1110,6 +1412,28 @@ public final class DesktopFrame extends JFrame {
             repaint();
         }
 
+        private void resetCamera() {
+            panX = 0;
+            panY = 0;
+            zoom = 1.0;
+            repaint();
+        }
+
+        private void adjustPan(double deltaX, double deltaY) {
+            panX += deltaX;
+            panY += deltaY;
+            repaint();
+        }
+
+        private void adjustZoom(double delta) {
+            setZoom(zoom + delta);
+        }
+
+        private void setZoom(double nextZoom) {
+            zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, nextZoom));
+            repaint();
+        }
+
         private ViewTreeItem pickItemAt(int x, int y) {
             if (!layer3dEnabled || renderedLayers.isEmpty()) return null;
             for (int i = renderedLayers.size() - 1; i >= 0; i--) {
@@ -1139,14 +1463,17 @@ public final class DesktopFrame extends JFrame {
 
             int availableWidth = getWidth();
             int availableHeight = getHeight();
+            double zoomFactor = layer3dEnabled ? zoom : 1.0;
+            double panOffsetX = layer3dEnabled ? panX : 0.0;
+            double panOffsetY = layer3dEnabled ? panY : 0.0;
             double scale = Math.min(
                 availableWidth / (double) image.getWidth(),
                 availableHeight / (double) image.getHeight()
-            );
+            ) * zoomFactor;
             int drawWidth = (int) Math.round(image.getWidth() * scale);
             int drawHeight = (int) Math.round(image.getHeight() * scale);
-            int drawX = (availableWidth - drawWidth) / 2;
-            int drawY = (availableHeight - drawHeight) / 2;
+            int drawX = (availableWidth - drawWidth) / 2 + (int) Math.round(panOffsetX);
+            int drawY = (availableHeight - drawHeight) / 2 + (int) Math.round(panOffsetY);
 
             if (!layer3dEnabled) {
                 renderedLayers = List.of();
@@ -1178,8 +1505,16 @@ public final class DesktopFrame extends JFrame {
             double sinPitch = Math.sin(pitchRad);
             double cosPitch = Math.cos(pitchRad);
 
-            double centerX = drawX + (image.getWidth() * scale) / 2.0;
-            double centerY = drawY + (image.getHeight() * scale) / 2.0;
+            double pivotX = selectedItem != null
+                ? selectedItem.relativeLeft + selectedItem.width / 2.0
+                : image.getWidth() / 2.0;
+            double pivotY = selectedItem != null
+                ? selectedItem.relativeTop + selectedItem.height / 2.0
+                : image.getHeight() / 2.0;
+            double pivotXScaled = pivotX * scale;
+            double pivotYScaled = pivotY * scale;
+            double centerX = drawX + pivotXScaled;
+            double centerY = drawY + pivotYScaled;
             double layerGap = depthSpacing * scale * LAYER_GAP_MULTIPLIER;
             double focalLength = Math.max(getWidth(), getHeight()) * PERSPECTIVE_MULTIPLIER;
 
@@ -1192,6 +1527,8 @@ public final class DesktopFrame extends JFrame {
                     centerX,
                     centerY,
                     scale,
+                    pivotXScaled,
+                    pivotYScaled,
                     layerGap,
                     sinYaw,
                     cosYaw,
@@ -1354,6 +1691,8 @@ public final class DesktopFrame extends JFrame {
             double centerX,
             double centerY,
             double scale,
+            double pivotXScaled,
+            double pivotYScaled,
             double layerGap,
             double sinYaw,
             double cosYaw,
@@ -1380,8 +1719,8 @@ public final class DesktopFrame extends JFrame {
             double avgCameraZ = 0;
 
             for (int i = 0; i < 4; i++) {
-                double px = corners[i][0] - (image.getWidth() * scale) / 2.0;
-                double py = corners[i][1] - (image.getHeight() * scale) / 2.0;
+                double px = corners[i][0] - pivotXScaled;
+                double py = corners[i][1] - pivotYScaled;
                 double pz = corners[i][2];
 
                 double xz = px * cosYaw + pz * sinYaw;
@@ -1446,5 +1785,47 @@ public final class DesktopFrame extends JFrame {
                 + exception.getMessage();
         }
         JOptionPane.showMessageDialog(this, message, "Error", JOptionPane.ERROR_MESSAGE);
+    }
+
+    private static final class DiscoveredTarget {
+        private final String host;
+        private final int port;
+        private final String appPackage;
+        private final String source;
+        private final boolean placeholder;
+        private final String text;
+
+        private DiscoveredTarget(
+            String host,
+            int port,
+            String appPackage,
+            String source,
+            boolean placeholder,
+            String text
+        ) {
+            this.host = host;
+            this.port = port;
+            this.appPackage = appPackage;
+            this.source = source;
+            this.placeholder = placeholder;
+            this.text = text;
+        }
+
+        private static DiscoveredTarget from(ConnectionScanner.DiscoveredEndpoint endpoint) {
+            String source = endpoint.source == null || endpoint.source.isBlank()
+                ? (endpoint.localhost ? "adb/local" : "lan")
+                : endpoint.source;
+            String text = endpoint.host + ":" + endpoint.port + "  [" + source + "]  " + endpoint.appPackage;
+            return new DiscoveredTarget(endpoint.host, endpoint.port, endpoint.appPackage, source, false, text);
+        }
+
+        private static DiscoveredTarget placeholder(String text) {
+            return new DiscoveredTarget("", -1, "", "", true, text);
+        }
+
+        @Override
+        public String toString() {
+            return text;
+        }
     }
 }

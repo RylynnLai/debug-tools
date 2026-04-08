@@ -11,7 +11,7 @@
 ## Response
 
 ```json
-{"id":"1","type":"view_tree","success":true,"payload":{"activity":"MainActivity","tree":{}}}
+{"id":"1","type":"view_tree","success":true,"payload":{"activity":"MainActivity","tree":{},"diagnostics":{}}}
 ```
 
 ## Commands
@@ -23,6 +23,8 @@
 - `list_mocks`
 - `set_mock`
 - `clear_mock`
+- `list_http_traffic`
+- `clear_http_traffic`
 - `list_watches`
 
 ## watch_list payload
@@ -92,6 +94,29 @@
 }
 ```
 
+Compose 节点（`nodeType=compose`）会额外带：
+
+```json
+{
+  "nodeType": "compose",
+  "composeNodeId": 42,
+  "testTag": "checkout_submit"
+}
+```
+
+`view_tree` 顶层可选 `diagnostics` 用于定位采集问题：
+
+```json
+{
+  "debuggable": true,
+  "composeRuntimePresent": true,
+  "composeHostViews": 1,
+  "composeSemanticsNodes": 46,
+  "composeReflectionOk": true,
+  "composeReflectionError": ""
+}
+```
+
 `className` is the full source class name (FQCN). In vector-only 3D mode, node `imageBase64` can be empty.
 
 ## update_view_props payload
@@ -130,3 +155,28 @@
   }
 }
 ```
+
+## http_traffic_list payload
+
+```json
+{
+  "items": [
+    {
+      "timestampMs": 1775320000000,
+      "method": "POST",
+      "host": "api.example.com",
+      "path": "/api/profile",
+      "query": "debug=true",
+      "statusCode": 200,
+      "requestBody": "{\"id\":1}",
+      "responseBody": "{\"name\":\"demo\"}",
+      "responseHeaders": {
+        "Content-Type": "application/json"
+      },
+      "mocked": false
+    }
+  ]
+}
+```
+
+桌面端默认轮询这个列表，展示被调试 app 当前经过代理的 API 流量。选中某条记录后，会把 `method/path/status/responseBody` 带入 mock 编辑区；保存后，后续相同 `method + path` 请求会持续命中 mock，直到执行 `clear_mock`。

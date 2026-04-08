@@ -12,4 +12,6 @@
 
 - 连接 Android probe
 - 拉取 View 树
-- 管理 mock 规则
+- 默认展示被调试 app 的 HTTP API 流量
+- 选中流量记录后编辑并启用 mock
+- 管理和关闭 mock 规则

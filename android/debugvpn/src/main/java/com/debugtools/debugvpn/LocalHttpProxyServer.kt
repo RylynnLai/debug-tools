@@ -1,12 +1,12 @@
 package com.debugtools.debugvpn
 
 import com.debugtools.debugkit.DebugKit
+import com.debugtools.debugkit.HttpTrafficRecord
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -15,6 +15,7 @@ import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -72,11 +73,39 @@ internal class LocalHttpProxyServer {
 
             val mock = DebugKit.mockRegistry().find(request.method, url.encodedPath)
             if (mock != null) {
+                DebugKit.httpTrafficRegistry().record(
+                    HttpTrafficRecord(
+                        timestampMs = System.currentTimeMillis(),
+                        method = request.method,
+                        host = url.host,
+                        path = url.encodedPath,
+                        query = url.encodedQuery ?: "",
+                        statusCode = mock.statusCode,
+                        requestBody = request.body.toDebugText(),
+                        responseBody = mock.body,
+                        responseHeaders = mock.headers,
+                        mocked = true
+                    )
+                )
                 writeMockResponse(output, mock.statusCode, mock.headers, mock.body.toByteArray())
                 return
             }
 
             val response = forwardToOrigin(request, url)
+            DebugKit.httpTrafficRegistry().record(
+                HttpTrafficRecord(
+                    timestampMs = System.currentTimeMillis(),
+                    method = request.method,
+                    host = url.host,
+                    path = url.encodedPath,
+                    query = url.encodedQuery ?: "",
+                    statusCode = response.code,
+                    requestBody = request.body.toDebugText(),
+                    responseBody = response.bodyText,
+                    responseHeaders = response.headers,
+                    mocked = false
+                )
+            )
             writeUpstreamResponse(output, response)
         }
     }
@@ -117,7 +146,7 @@ internal class LocalHttpProxyServer {
         return "http://$hostHeader$target".toHttpUrlOrNull()
     }
 
-    private fun forwardToOrigin(request: ProxyRequest, url: okhttp3.HttpUrl): Response {
+    private fun forwardToOrigin(request: ProxyRequest, url: okhttp3.HttpUrl): UpstreamResponse {
         val body = if (request.body.isNotEmpty()) {
             val contentType = request.headers["content-type"]?.toMediaTypeOrNull()
             request.body.toRequestBody(contentType)
@@ -134,7 +163,20 @@ internal class LocalHttpProxyServer {
             builder.header(key, value)
         }
 
-        return client.newCall(builder.build()).execute()
+        client.newCall(builder.build()).execute().use { response ->
+            val responseBytes = response.body?.bytes() ?: ByteArray(0)
+            val responseHeaders = linkedMapOf<String, String>()
+            response.headers.names().forEach { name ->
+                response.header(name)?.let { value -> responseHeaders[name] = value }
+            }
+            return UpstreamResponse(
+                code = response.code,
+                message = response.message,
+                headers = responseHeaders,
+                bodyBytes = responseBytes,
+                bodyText = responseBytes.toDebugText()
+            )
+        }
     }
 
     private fun writeMockResponse(
@@ -159,22 +201,18 @@ internal class LocalHttpProxyServer {
         output.flush()
     }
 
-    private fun writeUpstreamResponse(output: BufferedOutputStream, response: Response) {
-        response.use { upstream ->
-            val bodyBytes = upstream.body?.bytes() ?: ByteArray(0)
-            val message = upstream.message.ifBlank { "OK" }
-            output.write("HTTP/1.1 ${upstream.code} $message\r\n".toByteArray())
-            upstream.headers.names().forEach { name ->
-                if (name.equals("Transfer-Encoding", ignoreCase = true)) return@forEach
-                if (name.equals("Content-Length", ignoreCase = true)) return@forEach
-                val value = upstream.header(name) ?: return@forEach
-                output.write("$name: $value\r\n".toByteArray())
-            }
-            output.write("Content-Length: ${bodyBytes.size}\r\n".toByteArray())
-            output.write("Connection: close\r\n\r\n".toByteArray())
-            output.write(bodyBytes)
-            output.flush()
+    private fun writeUpstreamResponse(output: BufferedOutputStream, response: UpstreamResponse) {
+        val message = response.message.ifBlank { "OK" }
+        output.write("HTTP/1.1 ${response.code} $message\r\n".toByteArray())
+        response.headers.forEach { (name, value) ->
+            if (name.equals("Transfer-Encoding", ignoreCase = true)) return@forEach
+            if (name.equals("Content-Length", ignoreCase = true)) return@forEach
+            output.write("$name: $value\r\n".toByteArray())
         }
+        output.write("Content-Length: ${response.bodyBytes.size}\r\n".toByteArray())
+        output.write("Connection: close\r\n\r\n".toByteArray())
+        output.write(response.bodyBytes)
+        output.flush()
     }
 
     private fun tunnelHttps(target: String, input: InputStream, output: BufferedOutputStream) {
@@ -223,6 +261,19 @@ private data class ProxyRequest(
     val body: ByteArray
 )
 
+private data class UpstreamResponse(
+    val code: Int,
+    val message: String,
+    val headers: Map<String, String>,
+    val bodyBytes: ByteArray,
+    val bodyText: String
+)
+
+private fun ByteArray.toDebugText(): String {
+    if (isEmpty()) return ""
+    return toString(StandardCharsets.UTF_8)
+}
+
 private fun BufferedInputStream.readHttpLine(): String? {
     val out = ByteArrayOutputStream(128)
     var previous = -1
@@ -252,4 +303,3 @@ private fun BufferedInputStream.readFully(length: Int): ByteArray {
     }
     return if (read == length) data else data.copyOf(read)
 }
-

@@ -1,6 +1,7 @@
 package com.debugtools.debugkit
 
 import android.app.Activity
+import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
@@ -11,8 +12,10 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import java.io.ByteArrayOutputStream
+import java.lang.reflect.Method
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import kotlin.math.roundToInt
 
 internal object ViewInspector {
     fun inspect(activity: Activity?): ViewTreeSnapshot? {
@@ -20,11 +23,13 @@ internal object ViewInspector {
         val root = current.window?.decorView ?: return null
         val latch = CountDownLatch(1)
         var result: ViewTreeSnapshot? = null
+        val stats = CaptureStats()
         current.runOnUiThread {
             try {
                 result = ViewTreeSnapshot(
                     activity = current::class.java.simpleName,
-                    tree = capture(root, "0")
+                    tree = capture(root, "0", stats),
+                    diagnostics = captureDiagnostics(current, stats)
                 )
             } catch (_: Throwable) {
                 result = null
@@ -127,7 +132,7 @@ internal object ViewInspector {
         return updated
     }
 
-    private fun capture(view: View, path: String): ViewNode {
+    private fun capture(view: View, path: String, stats: CaptureStats): ViewNode {
         val location = IntArray(2)
         view.getLocationOnScreen(location)
         val base = ViewNode(
@@ -162,15 +167,240 @@ internal object ViewInspector {
             cornerRadiusPx = extractCornerRadius(view),
             iconHint = extractIconHint(view),
             imageBase64 = "",
+            nodeType = "view",
             children = emptyList()
         )
+
+        if (isComposeHostView(view)) {
+            stats.composeHostViews += 1
+            val composeChildren = captureComposeSemanticsChildren(view, path, stats)
+            if (composeChildren.isNotEmpty()) {
+                return base.copy(children = composeChildren)
+            }
+        }
+
         if (view !is ViewGroup) return base
         return base.copy(
             children = (0 until view.childCount).map { index ->
-                capture(view.getChildAt(index), "$path.$index")
+                capture(view.getChildAt(index), "$path.$index", stats)
             }
         )
     }
+
+    private fun captureComposeSemanticsChildren(view: View, path: String, stats: CaptureStats): List<ViewNode> {
+        return try {
+            val hostLocation = IntArray(2)
+            view.getLocationOnScreen(hostLocation)
+            val owner = callNoArg(view, "getSemanticsOwner") ?: return emptyList()
+            val root = callNoArg(owner, "getRootSemanticsNode") ?: return emptyList()
+            stats.composeReflectionOk = true
+            val rootChildren = readComposeChildren(root)
+            val nodes = if (rootChildren.isNotEmpty()) rootChildren else listOf(root)
+            nodes.mapIndexed { index, child ->
+                captureComposeNode(
+                    node = child,
+                    path = "$path.$index",
+                    hostLeft = hostLocation[0],
+                    hostTop = hostLocation[1],
+                    stats = stats,
+                    depth = 0
+                )
+            }
+        } catch (t: Throwable) {
+            stats.composeReflectionError = "${t::class.java.simpleName}: ${t.message ?: "unknown"}"
+            emptyList()
+        }
+    }
+
+    private fun captureComposeNode(
+        node: Any,
+        path: String,
+        hostLeft: Int,
+        hostTop: Int,
+        stats: CaptureStats,
+        depth: Int
+    ): ViewNode {
+        if (depth > 64 || stats.composeNodeCount >= 1200) {
+            return ViewNode(
+                path = path,
+                id = "compose-truncated",
+                idValue = -1,
+                className = "androidx.compose.ui.semantics.SemanticsNode",
+                visible = true,
+                visibility = "VISIBLE",
+                enabled = true,
+                clickable = false,
+                focusable = false,
+                left = hostLeft,
+                top = hostTop,
+                width = 0,
+                height = 0,
+                label = "[truncated]",
+                iconHint = "compose",
+                nodeType = "compose",
+                children = emptyList()
+            )
+        }
+        stats.composeNodeCount += 1
+
+        val id = (callNoArg(node, "getId") as? Int) ?: -1
+        val config = callNoArg(node, "getConfig")
+        val text = readComposeText(config)
+        val contentDescription = readComposeContentDescription(config)
+        val testTag = readComposeTestTag(config)
+        val clickable = readComposeClickable(config)
+
+        val windowRect = callNoArg(node, "getBoundsInWindow")
+        val rootRect = if (windowRect == null) callNoArg(node, "getBoundsInRoot") else null
+        val rect = windowRect ?: rootRect
+        val rawLeft = readFloat(rect, "getLeft")
+        val rawTop = readFloat(rect, "getTop")
+        val rawRight = readFloat(rect, "getRight")
+        val rawBottom = readFloat(rect, "getBottom")
+        val addHostOffset = windowRect == null && rootRect != null
+        val left = (if (addHostOffset) rawLeft + hostLeft else rawLeft).roundToInt()
+        val top = (if (addHostOffset) rawTop + hostTop else rawTop).roundToInt()
+        val width = (rawRight - rawLeft).coerceAtLeast(0f).roundToInt()
+        val height = (rawBottom - rawTop).coerceAtLeast(0f).roundToInt()
+        val label = when {
+            text.isNotBlank() -> text
+            contentDescription.isNotBlank() -> contentDescription
+            testTag.isNotBlank() -> testTag
+            else -> "compose#$id"
+        }
+
+        val children = readComposeChildren(node).mapIndexed { index, child ->
+            captureComposeNode(
+                node = child,
+                path = "$path.$index",
+                hostLeft = hostLeft,
+                hostTop = hostTop,
+                stats = stats,
+                depth = depth + 1
+            )
+        }
+
+        return ViewNode(
+            path = path,
+            id = if (testTag.isNotBlank()) testTag else "compose-$id",
+            idValue = -1,
+            className = "androidx.compose.ui.semantics.SemanticsNode",
+            visible = true,
+            visibility = "VISIBLE",
+            enabled = true,
+            clickable = clickable,
+            focusable = false,
+            left = left,
+            top = top,
+            width = width,
+            height = height,
+            label = label,
+            contentDescription = contentDescription,
+            iconHint = if (clickable) "button" else "compose",
+            nodeType = "compose",
+            composeNodeId = id,
+            testTag = testTag,
+            children = children
+        )
+    }
+
+    private fun isComposeHostView(view: View): Boolean {
+        return view::class.java.name.contains("AndroidComposeView")
+    }
+
+    private fun readComposeChildren(node: Any): List<Any> {
+        val value = callNoArg(node, "getChildren") ?: return emptyList()
+        val iterable = value as? Iterable<*> ?: return emptyList()
+        return iterable.filterNotNull()
+    }
+
+    private fun readComposeText(config: Any?): String {
+        val value = readSemanticsValue(config, "androidx.compose.ui.semantics.SemanticsProperties", "getText")
+        return valueToString(value)
+    }
+
+    private fun readComposeContentDescription(config: Any?): String {
+        val value = readSemanticsValue(config, "androidx.compose.ui.semantics.SemanticsProperties", "getContentDescription")
+        return valueToString(value)
+    }
+
+    private fun readComposeTestTag(config: Any?): String {
+        val value = readSemanticsValue(config, "androidx.compose.ui.semantics.SemanticsProperties", "getTestTag")
+        return value?.toString() ?: ""
+    }
+
+    private fun readComposeClickable(config: Any?): Boolean {
+        val value = readSemanticsValue(config, "androidx.compose.ui.semantics.SemanticsActions", "getOnClick")
+        return value != null
+    }
+
+    private fun readSemanticsValue(config: Any?, ownerClassName: String, keyMethod: String): Any? {
+        if (config == null) return null
+        val key = runCatching {
+            val ownerClass = Class.forName(ownerClassName)
+            val owner = runCatching { ownerClass.getField("INSTANCE").get(null) }.getOrNull()
+            val getter = ownerClass.methods.firstOrNull { it.name == keyMethod && it.parameterCount == 0 }
+            getter?.invoke(owner)
+        }.getOrNull() ?: return null
+        val method = config::class.java.methods.firstOrNull { it.name == "getOrNull" && it.parameterCount == 1 } ?: return null
+        return runCatching { method.invoke(config, key) }.getOrNull()
+    }
+
+    private fun valueToString(value: Any?): String {
+        if (value == null) return ""
+        return when (value) {
+            is String -> value
+            is Iterable<*> -> value.mapNotNull { item ->
+                when (item) {
+                    null -> null
+                    is String -> item
+                    else -> {
+                        callNoArg(item, "getText")?.toString() ?: item.toString()
+                    }
+                }
+            }.joinToString(" ").trim()
+            else -> value.toString()
+        }
+    }
+
+    private fun readFloat(target: Any?, methodName: String): Float {
+        if (target == null) return 0f
+        val number = callNoArg(target, methodName) as? Number ?: return 0f
+        return number.toFloat()
+    }
+
+    private fun callNoArg(target: Any, methodName: String): Any? {
+        val method = findNoArgMethod(target::class.java, methodName) ?: return null
+        return runCatching { method.invoke(target) }.getOrNull()
+    }
+
+    private fun findNoArgMethod(type: Class<*>, name: String): Method? {
+        return type.methods.firstOrNull { it.name == name && it.parameterCount == 0 }
+            ?: type.declaredMethods.firstOrNull { it.name == name && it.parameterCount == 0 }?.also { it.isAccessible = true }
+    }
+
+    private fun captureDiagnostics(activity: Activity, stats: CaptureStats): ViewTreeDiagnostics {
+        val debuggable = (activity.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
+        val composeRuntimePresent = runCatching {
+            Class.forName("androidx.compose.ui.platform.AndroidComposeView")
+            true
+        }.getOrDefault(false)
+        return ViewTreeDiagnostics(
+            debuggable = debuggable,
+            composeRuntimePresent = composeRuntimePresent,
+            composeHostViews = stats.composeHostViews,
+            composeSemanticsNodes = stats.composeNodeCount,
+            composeReflectionOk = stats.composeReflectionOk,
+            composeReflectionError = stats.composeReflectionError
+        )
+    }
+
+    private data class CaptureStats(
+        var composeHostViews: Int = 0,
+        var composeNodeCount: Int = 0,
+        var composeReflectionOk: Boolean = false,
+        var composeReflectionError: String = ""
+    )
 
     private fun extractLabel(view: View): String {
         return when (view) {
@@ -347,7 +577,17 @@ internal object ViewInspector {
 
 data class ViewTreeSnapshot(
     val activity: String,
-    val tree: ViewNode
+    val tree: ViewNode,
+    val diagnostics: ViewTreeDiagnostics
+)
+
+data class ViewTreeDiagnostics(
+    val debuggable: Boolean,
+    val composeRuntimePresent: Boolean,
+    val composeHostViews: Int,
+    val composeSemanticsNodes: Int,
+    val composeReflectionOk: Boolean,
+    val composeReflectionError: String = ""
 )
 
 data class ViewPreviewSnapshot(
@@ -390,5 +630,8 @@ data class ViewNode(
     val cornerRadiusPx: Float = 0f,
     val iconHint: String = "view",
     val imageBase64: String = "",
+    val nodeType: String = "view",
+    val composeNodeId: Int = -1,
+    val testTag: String = "",
     val children: List<ViewNode>
 )
